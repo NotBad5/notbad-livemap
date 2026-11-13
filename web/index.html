@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="robots" content="noindex">
+<title>Live map</title>
+<style>
+:root {
+    --ink: #10141b;
+    --panel: rgba(16, 20, 27, 0.94);
+    --line: rgba(255, 255, 255, 0.09);
+    --text: #eef1f5;
+    --muted: #8d95a3;
+    --foot: #35c7ff;
+    --vehicle: #ffb020;
+    --ok: #37d67a;
+    --bad: #ff5a4f;
+    --font: Bahnschrift, "DIN Alternate", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--ink);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 15px;
+}
+
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+/* ---- map ---- */
+#view {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    touch-action: none;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#view.dragging { cursor: grabbing; }
+
+#stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+}
+/* markers live in their own layer that is moved but never scaled, so names stay sharp */
+#markers {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+}
+#markers.snap .marker { transition: none; }
+#map-img { display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+#map-missing {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    background: repeating-linear-gradient(45deg, #151a22 0 24px, #181e27 24px 48px);
+    font-size: 28px;
+    text-align: center;
+    padding: 40px;
+}
+
+/* a marker is placed at its on-screen position for the current zoom */
+.marker {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    transition: transform var(--glide, 2000ms) linear;
+}
+.marker.fresh { transition: none; }
+.pin {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+.dot {
+    position: absolute;
+    left: -8px;
+    top: -8px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--foot);
+    border: 2.5px solid #fff;
+    box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65), 0 2px 6px rgba(0, 0, 0, .5);
+    cursor: pointer;
+}
+.marker.vehicle .dot { background: var(--vehicle); border-radius: 4px; }
+/* small pointer showing where the player is facing */
+.nose {
+    position: absolute;
+    left: -5px;
+    top: -19px;
+    width: 0;
+    height: 0;
+    border: 5px solid transparent;
+    border-bottom: 8px solid #fff;
+    border-top: 0;
+    filter: drop-shadow(0 0 1px rgba(0, 0, 0, .9));
+    transform-origin: 5px 19px;
+    pointer-events: none;
+}
+.name {
+    position: absolute;
+    left: 14px;
+    top: -11px;
+    padding: 2px 7px 1px;
+    border-radius: 3px;
+    background: rgba(10, 13, 18, .82);
+    white-space: nowrap;
+    font-size: 13px;
+    pointer-events: none;
+}
+body.no-names .marker:not(.selected) .name { display: none; }
+.marker.selected { z-index: 2; }
+.marker.selected .dot { box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65), 0 0 0 6px rgba(255, 255, 255, .35); }
+.marker.selected .name { background: #fff; color: #10141b; font-weight: 600; }
+
+/* ---- panel ---- */
+#panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    bottom: 16px;
+    width: 290px;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+}
+#panel header { padding: 18px 20px 14px; }
+#panel h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    font-stretch: 85%;
+}
+#count { margin: 4px 0 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+#search {
+    margin: 0 14px 10px;
+    padding: 9px 12px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, .05);
+}
+#search::placeholder { color: var(--muted); }
+
+#list {
+    flex: 1;
+    margin: 0;
+    padding: 6px;
+    list-style: none;
+    overflow-y: auto;
+    border-top: 1px solid var(--line);
+}
+#list button {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    width: 100%;
+    padding: 9px 12px 8px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    text-align: left;
+}
+#list button:hover { background: rgba(255, 255, 255, .07); }
+#list button.selected { background: rgba(255, 255, 255, .12); }
+#list .glyph {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--foot);
+    flex: none;
+}
+#list .vehicle .glyph { background: var(--vehicle); border-radius: 2px; }
+#list .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .id, #list .ping { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+#list .id { min-width: 22px; text-align: right; }
+#list .ping:empty { display: none; }
+#empty { padding: 14px; color: var(--muted); line-height: 1.4; }
+
+#legend {
+    display: flex;
+    gap: 16px;
+    padding: 11px 20px 12px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+}
+#legend span { display: flex; align-items: center; gap: 7px; }
+#legend i { width: 9px; height: 9px; border-radius: 50%; background: var(--foot); }
+#legend .veh i { background: var(--vehicle); border-radius: 2px; }
+
+/* ---- controls ---- */
+#controls {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+}
+#status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 13px 7px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}
+#status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+#status.off::before { background: var(--bad); }
+
+.tools { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.tools button { width: 40px; height: 38px; border: 0; background: transparent; font-size: 19px; line-height: 1; }
+.tools button + button { border-top: 1px solid var(--line); }
+.tools button:hover { background: rgba(255, 255, 255, .08); }
+.tools button.wide { width: auto; padding: 0 12px; font-size: 13px; }
+.tools button[aria-pressed="false"] { color: var(--muted); }
+
+#toggle-panel { display: none; }
+
+/* ---- coordinates under the cursor ---- */
+#coords {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    padding: 8px 13px 7px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+#coords.copied { color: var(--ok); }
+
+/* ---- calibration (open the map with ?calibrate) ---- */
+#cal {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 340px;
+    max-height: calc(100vh - 250px);
+    overflow-y: auto;
+    padding: 18px 20px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+}
+#cal h2 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+#cal p { margin: 0 0 12px; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+#cal label { display: block; margin: 0 0 4px; font-size: 13px; color: var(--muted); }
+#cal select, #cal input {
+    width: 100%;
+    padding: 8px 10px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #1a2029;
+}
+#cal .xy { display: flex; gap: 8px; margin: 8px 0 12px; }
+#cal .xy div { flex: 1; }
+#cal #cal-next { color: var(--vehicle); }
+#cal-points { margin: 0 0 12px; padding: 0; list-style: none; font-size: 13px; font-variant-numeric: tabular-nums; }
+#cal-points li { display: flex; gap: 8px; padding: 3px 0; color: var(--muted); }
+#cal-points b { color: var(--text); font-weight: 600; min-width: 16px; }
+#cal-quality.bad { color: var(--bad); }
+#cal-quality.good { color: var(--ok); }
+#cal pre {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    background: #0b0e13;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    user-select: text;
+    overflow-x: auto;
+}
+#cal .buttons { display: flex; gap: 8px; }
+#cal .buttons button {
+    flex: 1;
+    padding: 9px 10px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+}
+#cal .buttons button.primary { background: var(--text); color: var(--ink); border-color: transparent; font-weight: 600; }
+#cal .buttons button:disabled { opacity: .4; cursor: default; }
+
+.cal-pin { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 3; pointer-events: none; }
+.cal-pin span {
+    position: absolute;
+    left: -11px;
+    top: -11px;
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--vehicle);
+    color: #10141b;
+    border: 2px solid #fff;
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65);
+}
+body.calibrating #view { cursor: crosshair; }
+body.calibrating #coords { display: none; }
+
+/* ---- login ---- */
+#login {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(8, 10, 14, .82);
+    padding: 20px;
+}
+#login form {
+    width: 320px;
+    max-width: 100%;
+    padding: 24px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+}
+#login h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+#login p { margin: 0 0 16px; color: var(--muted); line-height: 1.4; }
+#login input {
+    width: 100%;
+    padding: 10px 12px 9px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, .05);
+}
+#login button {
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px 12px 9px;
+    border: 0;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--ink);
+    font-weight: 600;
+}
+#login-error { min-height: 20px; margin: 10px 0 0; color: var(--bad); }
+
+/* ---- phones ---- */
+@media (max-width: 700px) {
+    #panel {
+        top: auto;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: auto;
+        max-height: 55vh;
+    }
+    #panel.closed #search, #panel.closed #list, #panel.closed #legend { display: none; }
+    #panel header { display: flex; align-items: baseline; gap: 12px; padding: 13px 16px 11px; }
+    #panel h1 { font-size: 18px; }
+    #count { margin: 0; flex: 1; }
+    #toggle-panel { display: block; border: 0; background: transparent; color: var(--muted); padding: 0; }
+    #controls { top: 8px; right: 8px; }
+    #coords { top: 8px; left: 8px; right: auto; bottom: auto; }
+    #cal { left: 8px; right: 8px; bottom: 64px; width: auto; max-height: 50vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .marker { transition: none; }
+}
+</style>
+</head>
+<body>
+    <div id="view">
+        <div id="stage">
+            <img id="map-img" alt="" draggable="false">
+            <div id="map-missing" hidden>The map picture could not be loaded.<br>Check Config.MapImage.</div>
+        </div>
+        <div id="markers"></div>
+    </div>
+
+    <aside id="panel" class="closed">
+        <header>
+            <h1 id="title">Live map</h1>
+            <p id="count"></p>
+            <button id="toggle-panel" type="button">Players</button>
+        </header>
+        <input id="search" type="search" placeholder="Find a player" aria-label="Find a player" autocomplete="off">
+        <ul id="list"></ul>
+        <div id="legend">
+            <span><i></i>On foot</span>
+            <span class="veh"><i></i>In a vehicle</span>
+        </div>
+    </aside>
+
+    <div id="controls">
+        <div id="status">Connecting</div>
+        <div class="tools">
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+            <button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
+        </div>
+        <div class="tools">
+            <button id="fit" type="button" class="wide">Whole map</button>
+            <button id="names" type="button" class="wide" aria-pressed="true">Names</button>
+        </div>
+    </div>
+
+    <div id="coords" hidden></div>
+
+    <aside id="cal" hidden>
+        <h2>Line up a new map picture</h2>
+        <p>Mark two or more places whose game position you know. Pick spots far apart for the best result.</p>
+
+        <label for="cal-player">Use a player's current position (ask them to stand still)</label>
+        <select id="cal-player"><option value="">Type the position myself</option></select>
+        <div class="xy">
+            <div><label for="cal-x">Game X</label><input id="cal-x" type="number" step="any" inputmode="decimal"></div>
+            <div><label for="cal-y">Game Y</label><input id="cal-y" type="number" step="any" inputmode="decimal"></div>
+        </div>
+        <p id="cal-next"></p>
+
+        <ul id="cal-points"></ul>
+        <p id="cal-quality" hidden></p>
+        <pre id="cal-result" hidden></pre>
+        <div class="buttons">
+            <button id="cal-copy" type="button" class="primary" disabled>Copy for config.lua</button>
+            <button id="cal-undo" type="button" disabled>Undo last</button>
+        </div>
+    </aside>
+
+    <div id="login" hidden>
+        <form>
+            <h2>Password needed</h2>
+            <p>This map is private. Ask the server staff for the password.</p>
+            <input id="password" type="password" placeholder="Password" aria-label="Password" autocomplete="current-password">
+            <button type="submit">Open the map</button>
+            <p id="login-error" role="alert"></p>
+        </form>
+    </div>
+
+<script>
+(() => {
+    const cfg = __LIVEMAP_CONFIG__;
+    let cal = cfg.calibration || { size: 4096, zeroX: 1877.25, zeroY: 2765, scale: 3.037861303705727 };
+    const calibrating = /[?&#]calibrate\b/.test(location.search + location.hash);
+    const interval = Math.max(500, cfg.interval || 2000);
+    const base = location.pathname.replace(/index\.html$/, '').replace(/\/?$/, '/');
+    const $ = (id) => document.getElementById(id);
+
+    const view = $('view'), stage = $('stage'), img = $('map-img'), layer = $('markers');
+    const KEY_NAME = 'livemap-key:' + base;
+
+    let size = cal.size;                 // picture width in px
+    let sizeH = cal.size;                // picture height in px
+    let cam = { x: 0, y: 0, k: 1 };
+    let minK = 0.1;
+    let players = new Map();             // id -> { data, el, row }
+    let selected = null;
+    let filter = '';
+    let timer = null;
+    let key = '';
+    try { key = sessionStorage.getItem(KEY_NAME) || ''; } catch (e) { /* storage unavailable */ }
+
+    document.title = cfg.title || 'Live map';
+    $('title').textContent = cfg.title || 'Live map';
+    document.documentElement.style.setProperty('--glide', interval + 'ms');
+
+    // ---- camera ----
+    // smooth = glide along with the followed player instead of jumping
+    let placedK = 0;
+
+    function place(entry) {
+        const m = toMap(entry.data.x, entry.data.y);
+        entry.el.style.transform = `translate(${Math.round(m.x * cam.k)}px, ${Math.round(m.y * cam.k)}px)`;
+    }
+
+    function apply(smooth) {
+        const t = smooth ? `transform ${interval}ms linear` : 'none';
+        stage.style.transition = layer.style.transition = t;
+        stage.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.k})`;
+        layer.style.transform = `translate(${Math.round(cam.x)}px, ${Math.round(cam.y)}px)`;
+
+        // zoom changed: every marker gets a new on-screen position, without gliding there
+        if (cam.k !== placedK) {
+            placedK = cam.k;
+            layer.classList.add('snap');
+            players.forEach(place);
+            placeCalPins();
+            void layer.offsetWidth;
+            layer.classList.remove('snap');
+        }
+    }
+
+    function fit() {
+        // on wide screens keep the map clear of the player list
+        const inset = window.innerWidth > 700 ? 322 : 0;
+        const w = view.clientWidth - inset, h = view.clientHeight;
+        const k = Math.min(w / size, h / sizeH);
+        minK = k * 0.6;
+        cam = { k, x: inset + (w - size * k) / 2, y: (h - sizeH * k) / 2 };
+        apply();
+    }
+
+    function zoomAt(px, py, factor) {
+        const k = Math.min(6, Math.max(minK, cam.k * factor));
+        const ratio = k / cam.k;
+        cam.x = px - (px - cam.x) * ratio;
+        cam.y = py - (py - cam.y) * ratio;
+        cam.k = k;
+        apply();
+    }
+
+    function centerOn(mx, my, k, smooth) {
+        if (k) cam.k = Math.max(cam.k, k);
+        cam.x = view.clientWidth / 2 - mx * cam.k;
+        cam.y = view.clientHeight / 2 - my * cam.k;
+        apply(smooth);
+    }
+
+    // game coordinates -> map pixels
+    function toMap(x, y) {
+        const f = size / cal.size;
+        return { x: (cal.zeroX + x / cal.scale) * f, y: (cal.zeroY - y / cal.scale) * f };
+    }
+
+    // map pixels -> game coordinates (the reverse of toMap)
+    function toGame(mx, my) {
+        const f = size / cal.size;
+        return { x: (mx / f - cal.zeroX) * cal.scale, y: (cal.zeroY - my / f) * cal.scale };
+    }
+
+    function gameAt(clientX, clientY) {
+        return toGame((clientX - cam.x) / cam.k, (clientY - cam.y) / cam.k);
+    }
+
+    // ---- coordinates under the cursor, click to copy ----
+    const coords = $('coords');
+    let copiedTimer = null;
+
+    // one decimal, and never "-0.0"
+    const fmt = (v) => (Math.round(v * 10) / 10 || 0).toFixed(1);
+
+    function showCoords(clientX, clientY) {
+        if (copiedTimer) return;
+        const g = gameAt(clientX, clientY);
+        coords.hidden = false;
+        coords.textContent = `X ${fmt(g.x)}   Y ${fmt(g.y)}`;
+    }
+
+    function copyText(text) {
+        // navigator.clipboard needs HTTPS; the map usually runs on plain HTTP, so use the old way
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { /* not available */ }
+        area.remove();
+        return ok;
+    }
+
+    function copyCoords(clientX, clientY) {
+        const g = gameAt(clientX, clientY);
+        const text = `${fmt(g.x)}, ${fmt(g.y)}`;
+        const ok = copyText(text);
+        clearTimeout(copiedTimer);
+        coords.hidden = false;
+        coords.classList.toggle('copied', ok);
+        coords.textContent = ok ? `Copied ${text}` : text;
+        copiedTimer = setTimeout(() => { copiedTimer = null; coords.classList.remove('copied'); }, 1500);
+    }
+
+    // ---- calibration: fit game coordinates to a new picture from a few marked places ----
+    const calPoints = [];      // { gx, gy, px, py, el }  (px, py in picture pixels)
+
+    function placeCalPins() {
+        calPoints.forEach((p) => {
+            p.el.style.transform = `translate(${Math.round(p.px * cam.k)}px, ${Math.round(p.py * cam.k)}px)`;
+        });
+    }
+
+    // least-squares fit of: px = zeroX + gx / scale,  py = zeroY - gy / scale
+    function solveCalibration(points) {
+        const n = points.length;
+        if (n < 2) return null;
+        const mean = (key) => points.reduce((sum, p) => sum + p[key], 0) / n;
+        const mgx = mean('gx'), mgy = mean('gy'), mpx = mean('px'), mpy = mean('py');
+
+        let top = 0, bottom = 0;
+        points.forEach((p) => {
+            top += (p.gx - mgx) * (p.px - mpx) - (p.gy - mgy) * (p.py - mpy);
+            bottom += (p.gx - mgx) ** 2 + (p.gy - mgy) ** 2;
+        });
+        const k = top / bottom;                      // picture pixels per game unit
+        if (!isFinite(k) || k <= 0) return null;
+
+        const result = { size, zeroX: mpx - k * mgx, zeroY: mpy + k * mgy, scale: 1 / k };
+        // how far the marked places end up from where they were clicked, in pixels
+        result.error = points.reduce((sum, p) =>
+            sum + Math.hypot(result.zeroX + p.gx * k - p.px, result.zeroY - p.gy * k - p.py), 0) / n;
+        return result;
+    }
+
+    function calSnippet(c) {
+        const r = (v, d) => Number(v.toFixed(d));
+        return 'Config.Calibration = {\n'
+            + `    size  = ${c.size},\n`
+            + `    zeroX = ${r(c.zeroX, 2)},\n`
+            + `    zeroY = ${r(c.zeroY, 2)},\n`
+            + `    scale = ${r(c.scale, 6)},\n`
+            + '}';
+    }
+
+    function renderCal() {
+        const list = $('cal-points');
+        list.textContent = '';
+        calPoints.forEach((p, i) => {
+            const li = document.createElement('li');
+            const b = document.createElement('b');
+            b.textContent = i + 1;
+            li.append(b, `game ${fmt(p.gx)}, ${fmt(p.gy)}  at pixel ${Math.round(p.px)}, ${Math.round(p.py)}`);
+            list.appendChild(li);
+        });
+
+        const solved = solveCalibration(calPoints);
+        const quality = $('cal-quality'), result = $('cal-result');
+        $('cal-undo').disabled = calPoints.length === 0;
+        $('cal-copy').disabled = !solved;
+        result.hidden = !solved;
+        quality.hidden = calPoints.length < 2;
+
+        if (solved) {
+            cal = { size: solved.size, zeroX: solved.zeroX, zeroY: solved.zeroY, scale: solved.scale };
+            result.textContent = calSnippet(solved);
+            const bad = solved.error > size * 0.005;
+            quality.className = calPoints.length > 2 ? (bad ? 'bad' : 'good') : '';
+            quality.textContent = calPoints.length === 2
+                ? 'Players on the map now use this result. Add a third place to check how well it fits.'
+                : bad ? `The places disagree by about ${solved.error.toFixed(0)} px. One of them is probably off: undo and mark it again.`
+                      : `Good fit: the places agree to within ${Math.max(1, Math.round(solved.error))} px.`;
+            layer.classList.add('snap');
+            players.forEach(place);
+            void layer.offsetWidth;
+            layer.classList.remove('snap');
+        } else if (calPoints.length >= 2) {
+            quality.className = 'bad';
+            quality.textContent = 'These places cannot be used together. Pick spots that are far apart.';
+        }
+        updateCalHint();
+    }
+
+    function calTarget() {
+        const chosen = players.get(Number($('cal-player').value));
+        if (chosen) return { gx: chosen.data.x, gy: chosen.data.y };
+        const gx = parseFloat($('cal-x').value), gy = parseFloat($('cal-y').value);
+        return isFinite(gx) && isFinite(gy) ? { gx, gy } : null;
+    }
+
+    function updateCalHint() {
+        const chosen = players.get(Number($('cal-player').value));
+        if (chosen) { $('cal-x').value = chosen.data.x; $('cal-y').value = chosen.data.y; }
+        $('cal-x').disabled = $('cal-y').disabled = !!chosen;
+        $('cal-next').textContent = calTarget()
+            ? `Now click the exact spot on the map for place ${calPoints.length + 1}.`
+            : 'Choose a player or type a position first.';
+    }
+
+    function addCalPoint(clientX, clientY) {
+        const target = calTarget();
+        if (!target) { updateCalHint(); return; }
+
+        const el = document.createElement('div');
+        el.className = 'cal-pin';
+        const badge = document.createElement('span');
+        badge.textContent = calPoints.length + 1;
+        el.appendChild(badge);
+        layer.appendChild(el);
+
+        calPoints.push({ gx: target.gx, gy: target.gy, px: (clientX - cam.x) / cam.k, py: (clientY - cam.y) / cam.k, el });
+        placeCalPins();
+        $('cal-player').value = '';
+        $('cal-x').value = $('cal-y').value = '';
+        renderCal();
+    }
+
+    function refreshCalPlayers() {
+        if (!calibrating) return;
+        const box = $('cal-player');
+        const keep = box.value;
+        while (box.options.length > 1) box.remove(1);
+        [...players.values()].sort((a, b) => label(a.data).localeCompare(label(b.data))).forEach((e) => {
+            const o = document.createElement('option');
+            o.value = e.data.id;
+            o.textContent = `${label(e.data)} (${e.data.id})`;
+            box.appendChild(o);
+        });
+        box.value = players.has(Number(keep)) ? keep : '';
+        updateCalHint();
+    }
+
+    if (calibrating) {
+        document.body.classList.add('calibrating');
+        $('cal').hidden = false;
+        $('cal-player').addEventListener('change', updateCalHint);
+        $('cal-x').addEventListener('input', updateCalHint);
+        $('cal-y').addEventListener('input', updateCalHint);
+        $('cal-undo').onclick = () => { const p = calPoints.pop(); if (p) p.el.remove(); renderCal(); };
+        $('cal-copy').onclick = (e) => {
+            const ok = copyText($('cal-result').textContent);
+            e.currentTarget.textContent = ok ? 'Copied' : 'Select the text above';
+            setTimeout(() => { $('cal-copy').textContent = 'Copy for config.lua'; }, 1500);
+        };
+        updateCalHint();
+    }
+
+    // ---- pointer input: drag with one finger, pinch with two ----
+    const pointers = new Map();
+    let pinch = 0;
+    let moved = false;
+
+    view.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('.dot')) return;
+        e.preventDefault();
+        view.setPointerCapture(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        moved = false;
+        view.classList.add('dragging');
+    });
+
+    view.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'mouse') showCoords(e.clientX, e.clientY);
+        const prev = pointers.get(e.pointerId);
+        if (!prev) return;
+        const now = { x: e.clientX, y: e.clientY };
+
+        if (pointers.size === 1) {
+            cam.x += now.x - prev.x;
+            cam.y += now.y - prev.y;
+            if (Math.abs(now.x - prev.x) + Math.abs(now.y - prev.y) > 2) moved = true;
+            pointers.set(e.pointerId, now);
+            apply();
+        } else if (pointers.size === 2) {
+            pointers.set(e.pointerId, now);
+            const [a, b] = [...pointers.values()];
+            const dist = Math.hypot(a.x - b.x, a.y - b.y);
+            if (pinch) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, dist / pinch);
+            pinch = dist;
+            moved = true;
+        }
+        if (moved && selected !== null) select(null, true);   // dragging stops following a player
+    });
+
+    const release = (e) => {
+        // a click or tap that did not drag the map copies the coordinates of that spot
+        if (e.type === 'pointerup' && pointers.has(e.pointerId) && pointers.size === 1 && !moved) {
+            if (calibrating) addCalPoint(e.clientX, e.clientY);
+            else copyCoords(e.clientX, e.clientY);
+        }
+        pointers.delete(e.pointerId);
+        pinch = 0;
+        if (pointers.size === 0) view.classList.remove('dragging');
+    };
+    // the browser must never start its own drag-and-drop of the picture
+    view.addEventListener('dragstart', (e) => e.preventDefault());
+    view.addEventListener('pointerup', release);
+    view.addEventListener('pointercancel', release);
+
+    view.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+
+    $('zoom-in').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1.5);
+    $('zoom-out').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1 / 1.5);
+    $('fit').onclick = () => { select(null, true); fit(); };
+    $('names').onclick = (e) => {
+        const on = document.body.classList.toggle('no-names');
+        e.currentTarget.setAttribute('aria-pressed', String(!on));
+    };
+    $('toggle-panel').onclick = () => $('panel').classList.toggle('closed');
+    window.addEventListener('resize', () => { if (!selected) fit(); });
+
+    // ---- players ----
+    function label(p) { return p.name || ('Player ' + p.id); }
+
+    function select(id, keepView) {
+        if (selected === id) return;
+        const old = players.get(selected);
+        if (old) { old.el.classList.remove('selected'); old.row.classList.remove('selected'); }
+        selected = id;
+        const cur = players.get(id);
+        if (cur) {
+            cur.el.classList.add('selected');
+            cur.row.classList.add('selected');
+            if (!keepView) { const m = toMap(cur.data.x, cur.data.y); centerOn(m.x, m.y, 1.2); }
+        }
+    }
+
+    function create(p) {
+        const el = document.createElement('div');
+        el.className = 'marker fresh';
+        el.innerHTML = '<div class="pin"><div class="nose"></div><div class="dot"></div><div class="name"></div></div>';
+        el.querySelector('.dot').addEventListener('click', () => select(selected === p.id ? null : p.id));
+        layer.appendChild(el);
+
+        const li = document.createElement('li');
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.innerHTML = '<span class="glyph"></span><span class="who"></span><span class="ping"></span><span class="id"></span>';
+        row.addEventListener('click', () => {
+            select(null, true);
+            select(p.id);
+            if (window.innerWidth <= 700) $('panel').classList.add('closed');
+        });
+        li.appendChild(row);
+
+        return { el, row, li, data: p };
+    }
+
+    function update(list) {
+        const seen = new Set();
+
+        list.forEach((p) => {
+            seen.add(p.id);
+            let entry = players.get(p.id);
+            if (!entry) { entry = create(p); players.set(p.id, entry); }
+            entry.data = p;
+
+            place(entry);
+            entry.el.classList.toggle('vehicle', !!p.v);
+            entry.el.querySelector('.name').textContent = label(p);
+            // GTA heading: 0 = north, counter-clockwise
+            entry.el.querySelector('.nose').style.transform = `rotate(${-(p.h || 0)}deg)`;
+            requestAnimationFrame(() => entry.el.classList.remove('fresh'));
+
+            entry.row.classList.toggle('vehicle', !!p.v);
+            entry.row.querySelector('.who').textContent = label(p);
+            entry.row.querySelector('.id').textContent = p.name ? p.id : '';
+            entry.row.querySelector('.ping').textContent = typeof p.ping === 'number' ? p.ping + ' ms' : '';
+        });
+
+        players.forEach((entry, id) => {
+            if (seen.has(id)) return;
+            entry.el.remove();
+            entry.li.remove();
+            players.delete(id);
+            if (selected === id) selected = null;
+        });
+
+        renderList();
+        refreshCalPlayers();
+
+        const follow = players.get(selected);
+        if (follow && pointers.size === 0) {
+            const m = toMap(follow.data.x, follow.data.y);
+            centerOn(m.x, m.y, 0, true);
+        }
+    }
+
+    function renderList() {
+        const list = $('list');
+        const q = filter.trim().toLowerCase();
+        const sorted = [...players.values()].sort((a, b) => label(a.data).localeCompare(label(b.data)));
+        const shown = sorted.filter((e) => !q || label(e.data).toLowerCase().includes(q) || String(e.data.id) === q);
+
+        list.textContent = '';
+        shown.forEach((e) => list.appendChild(e.li));
+
+        if (shown.length === 0) {
+            const empty = document.createElement('li');
+            empty.id = 'empty';
+            empty.textContent = players.size === 0 ? 'Nobody is online right now.' : 'No player matches that search.';
+            list.appendChild(empty);
+        }
+    }
+
+    $('search').addEventListener('input', (e) => { filter = e.target.value; renderList(); });
+
+    // ---- data ----
+    function setStatus(text, ok) {
+        $('status').textContent = text;
+        $('status').classList.toggle('off', !ok);
+    }
+
+    function showLogin(message) {
+        clearTimeout(timer);
+        $('login').hidden = false;
+        $('login-error').textContent = message || '';
+        $('password').focus();
+    }
+
+    async function poll() {
+        clearTimeout(timer);
+        try {
+            const res = await fetch(base + 'players', { headers: key ? { 'X-Livemap-Key': key } : {}, cache: 'no-store' });
+
+            if (res.status === 401) {
+                const wrong = !!key;
+                key = '';
+                try { sessionStorage.removeItem(KEY_NAME); } catch (e) { /* ignore */ }
+                return showLogin(wrong ? 'That password is not right.' : '');
+            }
+            if (res.status === 429) return showLogin('Too many wrong tries. Wait a minute and try again.');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+
+            const data = await res.json();
+            const list = Array.isArray(data.players) ? data.players : [];
+            $('login').hidden = true;
+            update(list);
+            $('count').textContent = `${list.length} of ${data.max} players online`;
+            document.title = `(${list.length}) ${cfg.title || 'Live map'}`;
+            setStatus('Live', true);
+        } catch (e) {
+            setStatus('Server not responding', false);
+        }
+        timer = setTimeout(poll, interval);
+    }
+
+    $('login').querySelector('form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        key = $('password').value;
+        if (!key) return;
+        try { sessionStorage.setItem(KEY_NAME, key); } catch (err) { /* ignore */ }
+        $('password').value = '';
+        $('login-error').textContent = '';
+        poll();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) clearTimeout(timer);
+        else if ($('login').hidden) poll();
+    });
+
+    // ---- boot ----
+    function start() {
+        stage.style.width = size + 'px';
+        stage.style.height = sizeH + 'px';
+        fit();
+        poll();
+    }
+
+    if (window.innerWidth > 700) $('panel').classList.remove('closed');
+
+    img.addEventListener('load', () => { size = img.naturalWidth || cal.size; sizeH = img.naturalHeight || size; start(); });
+    img.addEventListener('error', () => { img.hidden = true; $('map-missing').hidden = false; start(); });
+    img.referrerPolicy = 'no-referrer';
+    img.src = cfg.mapImage;
+})();
+</script>
+</body>
+</html>
